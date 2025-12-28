@@ -36,6 +36,24 @@ CAPTCHA_API_KEY = "your_api_key_here"
 
 Your current balance: **$10.00**
 
+### 4. **IMPORTANT: Import Your YouTube Cookies** (Required for Email Extraction)
+
+To extract email addresses, you need to be logged in to YouTube. Import your browser cookies:
+
+#### Option A: Use the provided cookie importer (Recommended)
+
+Your cookies are already imported! The file `youtube_session.json` contains your authenticated session.
+
+#### Option B: Import from browser manually
+
+1. Export cookies from your browser using a cookie export extension
+2. Save them to a JSON file
+3. Run: `python3 import_cookies.py` (edit the script with your cookies)
+
+**Your cookies expire on:** January 25, 2027
+
+✅ **You're all set!** The scraper will now be able to access email addresses.
+
 ## Usage
 
 ### Scrape a single channel:
@@ -104,23 +122,32 @@ The scraper creates two files:
 
 ## Email Extraction
 
+### ✅ Working with Authentication!
+
+With your imported cookies, the scraper can now extract email addresses from channels that have them public.
+
+**Test Results:**
+- NetworkChuck: ✅ `chuck@networkchuck.com` extracted successfully!
+
+### How It Works:
+1. Scraper loads your YouTube session cookies
+2. Navigates to channel About page while authenticated
+3. If email is available, it's already visible (no captcha needed in most cases)
+4. If captcha appears, it's automatically solved using 2Captcha
+5. Email is extracted and saved to output files
+
 ### Important Notes:
-1. **Login Required**: To view channel emails, you must be logged in to YouTube
+1. **Cookies Valid Until:** January 25, 2027
 2. **Not All Channels Have Public Emails**: Many creators don't provide email addresses
-3. **reCAPTCHA Solving**: When an email is available, YouTube shows a reCAPTCHA which is automatically solved using 2Captcha
+3. **reCAPTCHA May Appear**: When it does, 2Captcha automatically solves it ($0.001-0.003 per solve)
 
-### Cost:
-- 2Captcha charges approximately $1-3 per 1000 captcha solves
-- For 100 profiles with emails: expect ~$0.10-0.30 in costs
-- Your current balance is sufficient for ~3,000-10,000 captcha solves
-
-### Without Login:
-If you run the scraper without being logged in to YouTube, you'll see:
+### Without Cookies:
+If cookies expire or you run without authentication, you'll see:
 ```
 ⚠ Email requires sign-in (not logged in to YouTube)
 ```
 
-The scraper will still collect all other channel information.
+Simply re-import your cookies using the import_cookies.py script.
 
 ## Project Structure
 

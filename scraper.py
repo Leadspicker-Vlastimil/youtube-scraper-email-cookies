@@ -23,9 +23,15 @@ class YouTubeScraper:
         self.captcha_solver = captcha_solver or CaptchaSolver()
         self.context = None
     
-    def start(self, headless: bool = None):
-        """Start the browser and create context."""
-        _, self.context = self.session_manager.start_browser(headless=headless, use_session=False)
+    def start(self, headless: bool = None, use_session: bool = True):
+        """
+        Start the browser and create context.
+        
+        Args:
+            headless: Run in headless mode
+            use_session: Use saved cookies for authentication (default: True)
+        """
+        _, self.context = self.session_manager.start_browser(headless=headless, use_session=use_session)
     
     def close(self):
         """Close the browser and clean up."""
@@ -500,19 +506,23 @@ class YouTubeScraper:
             Email address or None
         """
         try:
-            # Check if email is visible or if we need to sign in
-            page_content = page.content()
+            # Wait a bit for page to fully load
+            page.wait_for_timeout(1000)
             
-            # Check for "Sign in to see email" message
-            if 'Sign in to see email' in page_content or 'sign in' in page_content.lower():
+            # Look for "View email address" link/button or "Sign in to see email"
+            page_text = page.inner_text('body')
+            
+            # Check for sign-in requirement (more specific check)
+            if 'Sign in to see email address' in page_text:
                 print("  ⚠ Email requires sign-in (not logged in to YouTube)")
                 return None
             
-            # Look for "View email address" link/button
+            # Look for "View email address" button/link
             email_selectors = [
                 "text=View email address",
                 "button:has-text('View email')",
                 "a:has-text('View email')",
+                "a:has-text('email')",
             ]
             
             email_button = None
@@ -521,24 +531,26 @@ class YouTubeScraper:
                     button = page.locator(selector).first
                     if button.count() > 0 and button.is_visible(timeout=2000):
                         email_button = button
+                        print(f"  Found email button with selector: {selector}")
                         break
                 except:
                     continue
             
             if not email_button:
-                # Check if email is already visible
+                # Check if email is already visible on page
+                page_content = page.content()
                 email_match = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', page_content)
                 if email_match:
                     email = email_match.group(0)
                     # Filter out common false positives
-                    if not any(ex in email.lower() for ex in ['noreply@', 'example@', 'test@', '@youtube']):
-                        print(f"  ✓ Email found: {email}")
+                    if not any(ex in email.lower() for ex in ['noreply@', 'example@', 'test@', '@youtube', '@google']):
+                        print(f"  ✓ Email already visible: {email}")
                         return email
                 
                 print("  ⚠ 'View email address' button not found (channel may not have public email)")
                 return None
             
-            print("  Found 'View email address' button, clicking...")
+            print("  Clicking 'View email address' button...")
             email_button.click()
             page.wait_for_timeout(2000)
             
@@ -552,6 +564,9 @@ class YouTubeScraper:
                     return None
                 print("  ✓ reCAPTCHA solved, waiting for email...")
                 page.wait_for_timeout(3000)
+            else:
+                print("  No reCAPTCHA detected, email should be visible")
+                page.wait_for_timeout(1000)
             
             # Extract email from the page
             email = self._find_email_on_page(page)
@@ -565,6 +580,8 @@ class YouTubeScraper:
             
         except Exception as e:
             print(f"  ✗ Error extracting email: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def _has_recaptcha(self, page: Page) -> bool:
