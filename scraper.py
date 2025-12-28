@@ -594,13 +594,18 @@ class YouTubeScraper:
                 print(f"  ✓ Email extracted: {email}")
             else:
                 print("  ✗ Could not find email on page after clicking button")
-                # Debug: save page content
+                # Debug: Check what's on the page
                 try:
-                    page_text_after = page.inner_text('body')
-                    if 'email' in page_text_after.lower():
-                        print(f"  Debug: Page contains 'email' text but couldn't extract address")
-                except:
-                    pass
+                    page_text = page.inner_text('body')
+                    if '@' in page_text:
+                        # Find context around @ symbols
+                        lines_with_at = [line for line in page_text.split('\n') if '@' in line]
+                        if lines_with_at:
+                            print(f"  Debug: Found {len(lines_with_at)} lines with '@' symbol")
+                            for line in lines_with_at[:3]:  # Show first 3
+                                print(f"    - {line.strip()[:100]}")
+                except Exception as e:
+                    print(f"  Debug: Error checking page content: {e}")
             
             return email
             
@@ -613,10 +618,45 @@ class YouTubeScraper:
     def _has_recaptcha(self, page: Page) -> bool:
         """Check if reCAPTCHA is present on the page."""
         try:
-            # Look for reCAPTCHA iframe
-            recaptcha_frame = page.frame_locator('iframe[title*="reCAPTCHA"]').first
-            return recaptcha_frame.locator('body').count(timeout=3000) > 0
-        except:
+            # Method 1: Look for reCAPTCHA iframe by title
+            try:
+                recaptcha_frame = page.frame_locator('iframe[title*="reCAPTCHA"]').first
+                if recaptcha_frame.locator('body').count(timeout=2000) > 0:
+                    print("    Found reCAPTCHA via iframe title")
+                    return True
+            except:
+                pass
+            
+            # Method 2: Look for reCAPTCHA by src
+            try:
+                captcha_iframes = page.locator('iframe[src*="recaptcha"]').all()
+                if len(captcha_iframes) > 0:
+                    print("    Found reCAPTCHA via iframe src")
+                    return True
+            except:
+                pass
+            
+            # Method 3: Look for reCAPTCHA container div
+            try:
+                recaptcha_div = page.locator('.g-recaptcha, [class*="recaptcha"]').first
+                if recaptcha_div.count(timeout=2000) > 0:
+                    print("    Found reCAPTCHA via div class")
+                    return True
+            except:
+                pass
+            
+            # Method 4: Check page content for recaptcha strings
+            try:
+                content = page.content()
+                if 'recaptcha' in content.lower() or 'g-recaptcha' in content:
+                    print("    Found reCAPTCHA in page content")
+                    return True
+            except:
+                pass
+            
+            return False
+        except Exception as e:
+            print(f"    Error checking for reCAPTCHA: {e}")
             return False
     
     def _solve_recaptcha(self, page: Page) -> bool:
@@ -627,59 +667,119 @@ class YouTubeScraper:
             True if successful
         """
         try:
-            # Find the reCAPTCHA sitekey
+            print("    Looking for reCAPTCHA sitekey...")
+            
+            # Find the reCAPTCHA sitekey - try multiple methods
+            sitekey = None
+            
+            # Method 1: Look in page HTML
             page_content = page.content()
             sitekey_match = re.search(r'data-sitekey="([^"]+)"', page_content)
+            if sitekey_match:
+                sitekey = sitekey_match.group(1)
+                print(f"    Found sitekey in HTML: {sitekey[:20]}...")
             
-            if not sitekey_match:
-                # Try alternative method
+            # Method 2: Try to get from g-recaptcha div
+            if not sitekey:
                 try:
                     recaptcha_div = page.locator('.g-recaptcha').first
-                    sitekey = recaptcha_div.get_attribute('data-sitekey')
+                    if recaptcha_div.count() > 0:
+                        sitekey = recaptcha_div.get_attribute('data-sitekey')
+                        if sitekey:
+                            print(f"    Found sitekey in div: {sitekey[:20]}...")
                 except:
-                    print("  ✗ Could not find reCAPTCHA sitekey")
-                    return False
-            else:
-                sitekey = sitekey_match.group(1)
+                    pass
             
-            print(f"  Found sitekey: {sitekey[:20]}...")
+            # Method 3: Common YouTube reCAPTCHA sitekey (fallback)
+            if not sitekey:
+                # Look for any sitekey pattern in the page
+                sitekey_patterns = [
+                    r'sitekey["\s:]+([A-Za-z0-9_-]{40,})',
+                    r'"sitekey"\s*:\s*"([^"]+)"',
+                ]
+                for pattern in sitekey_patterns:
+                    match = re.search(pattern, page_content)
+                    if match:
+                        sitekey = match.group(1)
+                        print(f"    Found sitekey via pattern: {sitekey[:20]}...")
+                        break
+            
+            if not sitekey:
+                print("    ✗ Could not find reCAPTCHA sitekey")
+                return False
             
             # Solve captcha using 2Captcha
+            print(f"    Submitting to 2Captcha...")
             solution = self.captcha_solver.solve_recaptcha(sitekey, page.url)
             
             if not solution:
+                print("    ✗ 2Captcha failed to solve")
                 return False
             
             # Inject the solution
-            print("  Injecting solution...")
-            inject_script = f"""
-            document.getElementById('g-recaptcha-response').innerHTML = '{solution}';
-            """
-            page.evaluate(inject_script)
+            print("    Injecting solution into page...")
             
-            # Submit the form or trigger callback
+            # Try multiple injection methods
+            # Method 1: Standard g-recaptcha-response
             try:
-                # Look for submit button
+                inject_script = f"""
+                var textarea = document.getElementById('g-recaptcha-response');
+                if (textarea) {{
+                    textarea.innerHTML = '{solution}';
+                    textarea.value = '{solution}';
+                }}
+                """
+                page.evaluate(inject_script)
+                print("    Injected via g-recaptcha-response")
+            except Exception as e:
+                print(f"    Error with method 1: {e}")
+            
+            # Method 2: Try to trigger callback
+            try:
+                callback_script = f"""
+                if (typeof ___grecaptcha_cfg !== 'undefined') {{
+                    var clients = ___grecaptcha_cfg.clients;
+                    for (var id in clients) {{
+                        if (clients[id].callback) {{
+                            clients[id].callback('{solution}');
+                        }}
+                    }}
+                }}
+                """
+                page.evaluate(callback_script)
+                print("    Triggered reCAPTCHA callback")
+            except Exception as e:
+                print(f"    Note: Callback trigger not needed or failed: {e}")
+            
+            page.wait_for_timeout(2000)
+            
+            # Try to find and click submit button
+            try:
                 submit_selectors = [
                     "button[type='submit']",
                     "button:has-text('Submit')",
-                    "input[type='submit']"
+                    "input[type='submit']",
+                    "[aria-label*='submit' i]",
                 ]
                 for selector in submit_selectors:
                     try:
                         submit_btn = page.locator(selector).first
-                        if submit_btn.count() > 0:
+                        if submit_btn.count() > 0 and submit_btn.is_visible(timeout=1000):
+                            print(f"    Clicking submit button...")
                             submit_btn.click()
                             break
                     except:
                         continue
-            except:
-                pass
+            except Exception as e:
+                print(f"    Note: No submit button found (may auto-submit): {e}")
             
+            print("    ✓ reCAPTCHA solution injected")
             return True
             
         except Exception as e:
-            print(f"  ✗ Error solving reCAPTCHA: {e}")
+            print(f"    ✗ Error solving reCAPTCHA: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def _find_email_on_page(self, page: Page) -> Optional[str]:
