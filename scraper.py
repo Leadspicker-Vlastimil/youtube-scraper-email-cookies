@@ -581,8 +581,15 @@ class YouTubeScraper:
                 if not success:
                     print("  ✗ Failed to solve reCAPTCHA")
                     return None
-                print("  ✓ reCAPTCHA solved, waiting for email...")
-                page.wait_for_timeout(5000)
+                print("  ✓ reCAPTCHA solved and submitted, waiting for email to appear...")
+                page.wait_for_timeout(8000)  # Wait longer for email to load after submit
+                
+                # Try to wait for email to appear in the page
+                try:
+                    # Wait for text content to change (indicates page updated)
+                    page.wait_for_function("document.body.innerText.length > 1000", timeout=5000)
+                except:
+                    pass
             else:
                 print("  No reCAPTCHA detected, email should be visible now...")
                 page.wait_for_timeout(3000)  # Give more time for email to appear
@@ -719,61 +726,100 @@ class YouTubeScraper:
             # Inject the solution
             print("    Injecting solution into page...")
             
-            # Try multiple injection methods
-            # Method 1: Standard g-recaptcha-response
+            # Method 1: Inject into all possible reCAPTCHA response fields
             try:
                 inject_script = f"""
-                var textarea = document.getElementById('g-recaptcha-response');
-                if (textarea) {{
-                    textarea.innerHTML = '{solution}';
-                    textarea.value = '{solution}';
+                // Find and fill all g-recaptcha-response elements
+                var textareas = document.querySelectorAll('[name="g-recaptcha-response"], #g-recaptcha-response, .g-recaptcha-response');
+                for (var i = 0; i < textareas.length; i++) {{
+                    textareas[i].innerHTML = '{solution}';
+                    textareas[i].value = '{solution}';
+                    textareas[i].style.display = 'block';
                 }}
+                console.log('Injected solution into ' + textareas.length + ' fields');
                 """
                 page.evaluate(inject_script)
-                print("    Injected via g-recaptcha-response")
+                print("    ✓ Injected solution into response fields")
             except Exception as e:
-                print(f"    Error with method 1: {e}")
+                print(f"    Warning: Injection error: {e}")
             
-            # Method 2: Try to trigger callback
+            page.wait_for_timeout(1000)
+            
+            # Method 2: Trigger reCAPTCHA callback to mark as solved
             try:
                 callback_script = f"""
-                if (typeof ___grecaptcha_cfg !== 'undefined') {{
-                    var clients = ___grecaptcha_cfg.clients;
-                    for (var id in clients) {{
-                        if (clients[id].callback) {{
-                            clients[id].callback('{solution}');
+                (function() {{
+                    // Method 1: Try standard callback
+                    if (typeof ___grecaptcha_cfg !== 'undefined') {{
+                        var clients = ___grecaptcha_cfg.clients;
+                        for (var id in clients) {{
+                            if (clients[id] && clients[id].callback) {{
+                                clients[id].callback('{solution}');
+                                return true;
+                            }}
                         }}
                     }}
-                }}
+                    
+                    // Method 2: Try to find and execute callback from data attribute
+                    var recaptchaElement = document.querySelector('.g-recaptcha');
+                    if (recaptchaElement) {{
+                        var callback = recaptchaElement.getAttribute('data-callback');
+                        if (callback && typeof window[callback] === 'function') {{
+                            window[callback]('{solution}');
+                            return true;
+                        }}
+                    }}
+                    
+                    return false;
+                }})();
                 """
-                page.evaluate(callback_script)
-                print("    Triggered reCAPTCHA callback")
+                result = page.evaluate(callback_script)
+                if result:
+                    print("    ✓ Triggered reCAPTCHA callback")
+                else:
+                    print("    Note: No callback found (will try submit button)")
             except Exception as e:
-                print(f"    Note: Callback trigger not needed or failed: {e}")
+                print(f"    Note: Callback trigger: {e}")
             
             page.wait_for_timeout(2000)
             
-            # Try to find and click submit button
-            try:
-                submit_selectors = [
-                    "button[type='submit']",
-                    "button:has-text('Submit')",
-                    "input[type='submit']",
-                    "[aria-label*='submit' i]",
-                ]
-                for selector in submit_selectors:
-                    try:
-                        submit_btn = page.locator(selector).first
-                        if submit_btn.count() > 0 and submit_btn.is_visible(timeout=1000):
-                            print(f"    Clicking submit button...")
-                            submit_btn.click()
-                            break
-                    except:
-                        continue
-            except Exception as e:
-                print(f"    Note: No submit button found (may auto-submit): {e}")
+            # Method 3: Find and click the Submit button
+            print("    Looking for Submit button...")
+            submit_clicked = False
+            submit_selectors = [
+                "button:has-text('Submit')",
+                "input[type='submit']",
+                "button[type='submit']",
+                "[aria-label*='submit' i]",
+                "button:has-text('submit')",
+                "yt-button-renderer button",
+            ]
             
-            print("    ✓ reCAPTCHA solution injected")
+            for selector in submit_selectors:
+                try:
+                    buttons = page.locator(selector).all()
+                    for button in buttons:
+                        try:
+                            if button.is_visible(timeout=1000):
+                                button_text = button.inner_text(timeout=1000).lower() if button.inner_text(timeout=500) else ""
+                                # Make sure it's actually a submit button
+                                if 'submit' in button_text.lower() or selector == "button[type='submit']" or selector == "input[type='submit']":
+                                    print(f"    ✓ Found Submit button, clicking...")
+                                    button.click(timeout=3000)
+                                    submit_clicked = True
+                                    print("    ✓ Submit button clicked!")
+                                    break
+                        except Exception as e:
+                            continue
+                    if submit_clicked:
+                        break
+                except:
+                    continue
+            
+            if not submit_clicked:
+                print("    ⚠ Submit button not found - form may auto-submit")
+            
+            print("    ✓ reCAPTCHA solution processed")
             return True
             
         except Exception as e:
@@ -786,63 +832,88 @@ class YouTubeScraper:
         """Find email address on the page after captcha is solved or button clicked."""
         try:
             # Wait a bit for email to appear
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(2000)
             
-            # Method 1: Try to find email in visible text
+            # Common email regex pattern - more permissive
+            email_pattern = r'\b[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}\b'
+            
+            # Method 1: Try to find email in visible text (most reliable after form submit)
             try:
                 visible_text = page.inner_text('body')
-                email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-                matches = re.findall(email_pattern, visible_text)
+                matches = re.findall(email_pattern, visible_text, re.IGNORECASE)
                 
                 if matches:
                     # Filter out common false positives
-                    exclude = ['noreply@', 'example@', 'test@', '@youtube', '@google', 'support@']
-                    valid_emails = [e for e in matches if not any(ex in e.lower() for ex in exclude)]
+                    exclude = ['noreply@', 'example@', 'test@', '@youtube', '@google', 'support@', 'privacy@', 'copyright@']
+                    valid_emails = []
+                    for email in matches:
+                        email_lower = email.lower()
+                        # Skip if it's a false positive
+                        if any(ex in email_lower for ex in exclude):
+                            continue
+                        # Skip if it's just a handle (no dot in domain)
+                        if '@' in email and '.' in email.split('@')[1]:
+                            valid_emails.append(email)
+                    
                     if valid_emails:
+                        print(f"    Found {len(valid_emails)} potential email(s) in visible text")
                         return valid_emails[0]
             except Exception as e:
                 print(f"  Debug: Error in visible text search: {e}")
             
-            # Method 2: Search in page HTML content
+            # Method 2: Look for email in specific modal/dialog elements that appear after submit
             try:
-                content = page.content()
-                email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-                matches = re.findall(email_pattern, content)
-                
-                if matches:
-                    # Filter out common false positives
-                    exclude = ['noreply@', 'example@', 'test@', '@youtube', '@google', 'support@']
-                    valid_emails = [e for e in matches if not any(ex in e.lower() for ex in exclude)]
-                    if valid_emails:
-                        return valid_emails[0]
-            except Exception as e:
-                print(f"  Debug: Error in HTML content search: {e}")
-            
-            # Method 3: Look for email in specific containers
-            try:
-                # Try to find email in modal or dialog
-                email_containers = [
+                modal_selectors = [
                     '[role="dialog"]',
                     '.ytd-about-channel-renderer',
-                    '#email',
-                    '[id*="email"]',
+                    'ytd-about-channel-renderer',
+                    '#content-container',
+                    'yt-formatted-string',
                 ]
                 
-                for container_selector in email_containers:
+                for selector in modal_selectors:
                     try:
-                        container = page.locator(container_selector).first
-                        if container.count() > 0:
-                            container_text = container.inner_text(timeout=2000)
-                            matches = re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', container_text)
-                            if matches:
-                                exclude = ['noreply@', 'example@', 'test@', '@youtube', '@google']
-                                valid_emails = [e for e in matches if not any(ex in e.lower() for ex in exclude)]
-                                if valid_emails:
-                                    return valid_emails[0]
+                        elements = page.locator(selector).all()
+                        for element in elements:
+                            try:
+                                if element.is_visible(timeout=1000):
+                                    elem_text = element.inner_text(timeout=2000)
+                                    matches = re.findall(email_pattern, elem_text, re.IGNORECASE)
+                                    if matches:
+                                        exclude = ['noreply@', 'example@', 'test@', '@youtube', '@google', 'support@']
+                                        for email in matches:
+                                            if not any(ex in email.lower() for ex in exclude):
+                                                if '@' in email and '.' in email.split('@')[1]:
+                                                    print(f"    Found email in element: {selector}")
+                                                    return email
+                            except:
+                                continue
                     except:
                         continue
             except Exception as e:
-                print(f"  Debug: Error in container search: {e}")
+                print(f"  Debug: Error in modal search: {e}")
+            
+            # Method 3: Search in page HTML content
+            try:
+                content = page.content()
+                matches = re.findall(email_pattern, content, re.IGNORECASE)
+                
+                if matches:
+                    # Filter out common false positives
+                    exclude = ['noreply@', 'example@', 'test@', '@youtube', '@google', 'support@', 'privacy@', 'copyright@']
+                    valid_emails = []
+                    for email in matches:
+                        email_lower = email.lower()
+                        if any(ex in email_lower for ex in exclude):
+                            continue
+                        if '@' in email and '.' in email.split('@')[1]:
+                            valid_emails.append(email)
+                    
+                    if valid_emails:
+                        print(f"    Found {len(valid_emails)} potential email(s) in HTML")
+                        return valid_emails[0]
+            except Exception as e:
+                print(f"  Debug: Error in HTML content search: {e}")
             
             return None
             
