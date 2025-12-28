@@ -507,7 +507,7 @@ class YouTubeScraper:
         """
         try:
             # Wait a bit for page to fully load
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(2000)
             
             # Look for "View email address" link/button or "Sign in to see email"
             page_text = page.inner_text('body')
@@ -517,45 +517,64 @@ class YouTubeScraper:
                 print("  ⚠ Email requires sign-in (not logged in to YouTube)")
                 return None
             
-            # Look for "View email address" button/link
+            # First check if email is already visible (happens after authentication sometimes)
+            page_content = page.content()
+            email_match = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', page_content)
+            if email_match:
+                email = email_match.group(0)
+                # Filter out common false positives
+                if not any(ex in email.lower() for ex in ['noreply@', 'example@', 'test@', '@youtube', '@google']):
+                    print(f"  ✓ Email already visible: {email}")
+                    return email
+            
+            # Look for "View email address" button/link - try multiple selectors
+            print("  Looking for 'View email address' button...")
             email_selectors = [
-                "text=View email address",
+                "text=/View email address/i",
                 "button:has-text('View email')",
                 "a:has-text('View email')",
-                "a:has-text('email')",
+                "[aria-label*='email' i]",
+                "yt-button-renderer:has-text('View email')",
+                "a.yt-simple-endpoint:has-text('email')",
             ]
             
             email_button = None
             for selector in email_selectors:
                 try:
-                    button = page.locator(selector).first
-                    if button.count() > 0 and button.is_visible(timeout=2000):
-                        email_button = button
-                        print(f"  Found email button with selector: {selector}")
+                    buttons = page.locator(selector).all()
+                    for button in buttons:
+                        try:
+                            if button.is_visible(timeout=1000):
+                                button_text = button.inner_text(timeout=1000).lower()
+                                if 'view' in button_text and 'email' in button_text:
+                                    email_button = button
+                                    print(f"  ✓ Found 'View email address' button")
+                                    break
+                        except:
+                            continue
+                    if email_button:
                         break
                 except:
                     continue
             
             if not email_button:
-                # Check if email is already visible on page
-                page_content = page.content()
-                email_match = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', page_content)
-                if email_match:
-                    email = email_match.group(0)
-                    # Filter out common false positives
-                    if not any(ex in email.lower() for ex in ['noreply@', 'example@', 'test@', '@youtube', '@google']):
-                        print(f"  ✓ Email already visible: {email}")
-                        return email
-                
                 print("  ⚠ 'View email address' button not found (channel may not have public email)")
                 return None
             
+            # Click the button
             print("  Clicking 'View email address' button...")
-            email_button.click()
-            page.wait_for_timeout(2000)
+            try:
+                email_button.click(timeout=5000)
+                print("  Button clicked, waiting for response...")
+                page.wait_for_timeout(5000)  # Wait longer for content to load/modal to appear
+            except Exception as e:
+                print(f"  ✗ Error clicking button: {e}")
+                return None
             
             # Check if reCAPTCHA appeared
             print("  Checking for reCAPTCHA...")
+            page.wait_for_timeout(2000)  # Give time for captcha to load if it will
+            
             if self._has_recaptcha(page):
                 print("  ✓ reCAPTCHA detected, solving...")
                 success = self._solve_recaptcha(page)
@@ -563,18 +582,25 @@ class YouTubeScraper:
                     print("  ✗ Failed to solve reCAPTCHA")
                     return None
                 print("  ✓ reCAPTCHA solved, waiting for email...")
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(5000)
             else:
-                print("  No reCAPTCHA detected, email should be visible")
-                page.wait_for_timeout(1000)
+                print("  No reCAPTCHA detected, email should be visible now...")
+                page.wait_for_timeout(3000)  # Give more time for email to appear
             
-            # Extract email from the page
+            # Extract email from the page (multiple attempts)
             email = self._find_email_on_page(page)
             
             if email:
-                print(f"  ✓ Email found: {email}")
+                print(f"  ✓ Email extracted: {email}")
             else:
-                print("  ✗ Could not find email on page")
+                print("  ✗ Could not find email on page after clicking button")
+                # Debug: save page content
+                try:
+                    page_text_after = page.inner_text('body')
+                    if 'email' in page_text_after.lower():
+                        print(f"  Debug: Page contains 'email' text but couldn't extract address")
+                except:
+                    pass
             
             return email
             
@@ -657,29 +683,66 @@ class YouTubeScraper:
             return False
     
     def _find_email_on_page(self, page: Page) -> Optional[str]:
-        """Find email address on the page after captcha is solved."""
+        """Find email address on the page after captcha is solved or button clicked."""
         try:
-            # Common email regex pattern
-            email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+            # Wait a bit for email to appear
+            page.wait_for_timeout(1000)
             
-            # Get page content
-            content = page.content()
-            matches = re.findall(email_pattern, content)
-            
-            if matches:
-                # Filter out common false positives
-                exclude = ['noreply@', 'example@', 'test@']
-                valid_emails = [e for e in matches if not any(ex in e.lower() for ex in exclude)]
-                if valid_emails:
-                    return valid_emails[0]
-            
-            # Try looking in specific elements
+            # Method 1: Try to find email in visible text
             try:
-                email_elem = page.locator('text=/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z|a-z]{2,}/').first
-                if email_elem.count() > 0:
-                    return email_elem.inner_text(timeout=2000)
-            except:
-                pass
+                visible_text = page.inner_text('body')
+                email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+                matches = re.findall(email_pattern, visible_text)
+                
+                if matches:
+                    # Filter out common false positives
+                    exclude = ['noreply@', 'example@', 'test@', '@youtube', '@google', 'support@']
+                    valid_emails = [e for e in matches if not any(ex in e.lower() for ex in exclude)]
+                    if valid_emails:
+                        return valid_emails[0]
+            except Exception as e:
+                print(f"  Debug: Error in visible text search: {e}")
+            
+            # Method 2: Search in page HTML content
+            try:
+                content = page.content()
+                email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+                matches = re.findall(email_pattern, content)
+                
+                if matches:
+                    # Filter out common false positives
+                    exclude = ['noreply@', 'example@', 'test@', '@youtube', '@google', 'support@']
+                    valid_emails = [e for e in matches if not any(ex in e.lower() for ex in exclude)]
+                    if valid_emails:
+                        return valid_emails[0]
+            except Exception as e:
+                print(f"  Debug: Error in HTML content search: {e}")
+            
+            # Method 3: Look for email in specific containers
+            try:
+                # Try to find email in modal or dialog
+                email_containers = [
+                    '[role="dialog"]',
+                    '.ytd-about-channel-renderer',
+                    '#email',
+                    '[id*="email"]',
+                ]
+                
+                for container_selector in email_containers:
+                    try:
+                        container = page.locator(container_selector).first
+                        if container.count() > 0:
+                            container_text = container.inner_text(timeout=2000)
+                            matches = re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', container_text)
+                            if matches:
+                                exclude = ['noreply@', 'example@', 'test@', '@youtube', '@google']
+                                valid_emails = [e for e in matches if not any(ex in e.lower() for ex in exclude)]
+                                if valid_emails:
+                                    return valid_emails[0]
+                    except:
+                        continue
+            except Exception as e:
+                print(f"  Debug: Error in container search: {e}")
             
             return None
             
