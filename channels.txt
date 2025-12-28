@@ -1,0 +1,11 @@
+# YouTube channels to scrape (one URL per line)
+# Lines starting with # are comments
+
+# Tech/Programming Channels
+https://www.youtube.com/@NetworkChuck
+https://www.youtube.com/@ThePrimeagen
+https://www.youtube.com/@Fireship
+
+# You can also use handles without full URL
+# @channelhandle
+
